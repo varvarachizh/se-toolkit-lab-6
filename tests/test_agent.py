@@ -1,5 +1,5 @@
 """
-Regression tests for agent.py (Task 1 & Task 2)
+Regression tests for agent.py (Task 1, Task 2 & Task 3)
 
 Tests verify that the agent outputs valid JSON with the required fields
 and uses tools correctly.
@@ -118,3 +118,88 @@ def test_agent_wiki_listing_question():
     assert len(output["tool_calls"]) > 0, "Expected at least one tool call"
 
     print(f"✓ Test passed: tool_calls={len(output['tool_calls'])}")
+
+
+def test_agent_backend_framework_question():
+    """Test that agent uses read_file to find backend framework."""
+    project_root = Path(__file__).parent.parent
+    agent_path = project_root / "agent.py"
+
+    # Run agent with framework question
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(agent_path),
+            "What Python web framework does the backend use?",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with stderr: {result.stderr}"
+
+    # Parse stdout as JSON
+    output = json.loads(result.stdout)
+
+    # Verify required fields
+    assert "answer" in output, "Missing 'answer' field"
+    assert "tool_calls" in output, "Missing 'tool_calls' field"
+
+    # Verify read_file was used (to read source code)
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "read_file" in tool_names, "Expected read_file to be called"
+
+    # Verify answer mentions FastAPI
+    answer = output.get("answer", "").lower()
+    assert "fastapi" in answer, (
+        f"Answer should mention FastAPI, got: {output.get('answer', '')}"
+    )
+
+    print(
+        f"✓ Test passed: answer mentions FastAPI, tool_calls={len(output['tool_calls'])}"
+    )
+
+
+def test_agent_query_api_items_count():
+    """Test that agent uses query_api to get items count."""
+    project_root = Path(__file__).parent.parent
+    agent_path = project_root / "agent.py"
+
+    # Run agent with items count question
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(agent_path),
+            "How many items are currently stored in the database?",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with stderr: {result.stderr}"
+
+    # Parse stdout as JSON
+    output = json.loads(result.stdout)
+
+    # Verify required fields
+    assert "answer" in output, "Missing 'answer' field"
+    assert "tool_calls" in output, "Missing 'tool_calls' field"
+
+    # Verify query_api was used
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "query_api" in tool_names, "Expected query_api to be called"
+
+    # Verify answer contains a number
+    import re
+
+    answer = output.get("answer", "")
+    numbers = re.findall(r"\d+", answer)
+    assert len(numbers) > 0, f"Answer should contain a number, got: {answer}"
+
+    print(
+        f"✓ Test passed: answer contains number, tool_calls={len(output['tool_calls'])}"
+    )

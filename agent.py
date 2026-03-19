@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Agent CLI - Task 2: The Documentation Agent
+Agent CLI - Task 3: The System Agent
 
-A CLI agent that uses tools (read_file, list_files) to navigate the project wiki
-and answer questions with proper source references.
+A CLI agent that uses tools (read_file, list_files, query_api) to answer questions
+about the project wiki, source code, and backend API data.
 
 Usage:
-    uv run agent.py "How do you resolve a merge conflict?"
+    uv run agent.py "How many items are in the database?"
 
 Output:
     {
       "answer": "...",
-      "source": "wiki/git-workflow.md#section",
+      "source": "wiki/git.md",
       "tool_calls": [...]
     }
 """
@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any, TypedDict
 
+import httpx
 from openai import OpenAI
 
 
@@ -44,29 +45,29 @@ class AgentOutput(TypedDict):
 # Maximum tool call iterations
 MAX_ITERATIONS = 10
 
-# System prompt for the documentation agent
-SYSTEM_PROMPT = """You are a documentation agent that helps users find information in the project wiki.
+# System prompt for the system agent
+SYSTEM_PROMPT = """You are a system agent that helps users find information about the project.
 
-You have access to two tools:
+You have access to three tools:
 1. list_files - List files and directories at a given path
 2. read_file - Read the contents of a file
+3. query_api - Call the backend API to query data or perform operations
 
 To answer questions:
-1. First use list_files to explore the wiki directory structure
-2. Then use read_file to read relevant wiki files
-3. Find the specific section that answers the question
-4. Include the source reference in format: wiki/filename.md#section-anchor
+- For wiki documentation: use list_files to explore, then read_file to find details
+- For system facts (framework, ports, status codes): use read_file on source code
+- For data-dependent questions (item count, scores, errors): use query_api
+- For bug diagnosis: use query_api to reproduce the error, then read_file to find the bug
 
 Rules:
-- Always start by exploring the wiki directory with list_files("wiki")
-- Read files one at a time with read_file
-- When you find the answer, provide it with the exact source reference
-- Section anchors are lowercase with hyphens (e.g., #resolving-merge-conflicts)
+- Use query_api with X-API-Key authentication (handled automatically)
+- For GET requests, use method="GET"
+- Include query parameters in the path (e.g., "/analytics/completion-rate?lab=lab-99")
 - Call tools step by step, not all at once
 - Stop when you have enough information to answer
 
-If the question is not about the project documentation, answer based on your general knowledge
-and set source to "general-knowledge"."""
+If the question is not about this project, answer based on general knowledge.
+For general knowledge questions, set source to "general-knowledge"."""
 
 
 def load_env(env_path: str) -> dict[str, str]:
@@ -167,6 +168,68 @@ def tool_list_files(path: str, project_root: Path) -> str:
         return f"Error listing directory: {e}"
 
 
+def tool_query_api(
+    method: str,
+    path: str,
+    body: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """
+    Call backend API with LMS_API_KEY authentication.
+
+    Args:
+        method: HTTP method (GET, POST, PUT, DELETE)
+        path: API path (e.g., "/items/", "/analytics/completion-rate")
+        body: Optional JSON request body for POST/PUT
+        api_key: LMS API key for authentication
+        base_url: Base URL for the API
+
+    Returns:
+        JSON string with status_code and body
+    """
+    if not api_key:
+        return json.dumps({"status_code": 0, "error": "LMS_API_KEY not configured"})
+
+    if not base_url:
+        base_url = "http://localhost:42002"
+
+    url = f"{base_url}{path}"
+    headers = {"X-API-Key": api_key}
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            if method.upper() == "GET":
+                response = client.get(url, headers=headers)
+            elif method.upper() == "POST":
+                json_body = json.loads(body) if body else None
+                response = client.post(url, headers=headers, json=json_body)
+            elif method.upper() == "PUT":
+                json_body = json.loads(body) if body else None
+                response = client.put(url, headers=headers, json=json_body)
+            elif method.upper() == "DELETE":
+                response = client.delete(url, headers=headers)
+            else:
+                return json.dumps(
+                    {"status_code": 0, "error": f"Unknown method: {method}"}
+                )
+
+            return json.dumps(
+                {
+                    "status_code": response.status_code,
+                    "body": response.text,
+                }
+            )
+    except httpx.TimeoutException:
+        return json.dumps({"status_code": 0, "error": "API request timed out"})
+    except httpx.RequestError as e:
+        return json.dumps({"status_code": 0, "error": str(e)})
+    except json.JSONDecodeError as e:
+        return json.dumps({"status_code": 0, "error": f"Invalid JSON body: {e}"})
+    except Exception as e:
+        return json.dumps({"status_code": 0, "error": str(e)})
+
+
 # Tool definitions for OpenAI API
 TOOLS: list[dict[str, Any]] = [
     {
@@ -203,17 +266,51 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_api",
+            "description": "Call the backend API to query data or perform operations. Use for data-dependent questions (item counts, scores, errors) or to check system behavior.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method (GET, POST, PUT, DELETE)",
+                        "enum": ["GET", "POST", "PUT", "DELETE"],
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "API path starting with / (e.g., /items/, /analytics/completion-rate?lab=lab-99)",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional JSON request body for POST/PUT requests",
+                    },
+                },
+                "required": ["method", "path"],
+            },
+        },
+    },
 ]
 
 
-def execute_tool(name: str, args: dict[str, str], project_root: Path) -> str:
+def execute_tool(
+    name: str,
+    args: dict[str, str],
+    project_root: Path,
+    lms_api_key: str | None = None,
+    agent_api_base_url: str | None = None,
+) -> str:
     """
     Execute a tool by name with the given arguments.
 
     Args:
-        name: Tool name (read_file or list_files)
+        name: Tool name (read_file, list_files, query_api)
         args: Tool arguments
         project_root: Project root directory
+        lms_api_key: LMS API key for query_api
+        agent_api_base_url: Base URL for query_api
 
     Returns:
         Tool result as string
@@ -224,6 +321,11 @@ def execute_tool(name: str, args: dict[str, str], project_root: Path) -> str:
     elif name == "list_files":
         path = args.get("path", "")
         return tool_list_files(path, project_root)
+    elif name == "query_api":
+        method = args.get("method", "GET")
+        path = args.get("path", "")
+        body = args.get("body")
+        return tool_query_api(method, path, body, lms_api_key, agent_api_base_url)
     else:
         return f"Error: Unknown tool: {name}"
 
@@ -232,13 +334,13 @@ def extract_source_from_tool_calls(tool_calls: list[ToolCall]) -> str:
     """
     Extract source reference from tool calls.
 
-    Returns the last read_file path, or "general-knowledge" if none.
+    Returns the last read_file path from wiki/, or "general-knowledge" if none.
     """
     for tool_call in reversed(tool_calls):
         if tool_call["tool"] == "read_file":
             path = tool_call["args"].get("path", "")
             if path.startswith("wiki/"):
-                return f"{path}"
+                return path
     return "general-knowledge"
 
 
@@ -247,6 +349,8 @@ def run_agentic_loop(
     model: str,
     question: str,
     project_root: Path,
+    lms_api_key: str | None = None,
+    agent_api_base_url: str | None = None,
 ) -> AgentOutput:
     """
     Run the agentic loop: LLM → tool calls → execute → LLM → ...
@@ -256,6 +360,8 @@ def run_agentic_loop(
         model: Model name
         question: User's question
         project_root: Project root directory
+        lms_api_key: LMS API key for query_api
+        agent_api_base_url: Base URL for query_api
 
     Returns:
         AgentOutput with answer, source, and tool_calls
@@ -308,7 +414,13 @@ def run_agentic_loop(
             print(f"Executing tool: {function_name}({function_args})", file=sys.stderr)
 
             # Execute the tool
-            result = execute_tool(function_name, function_args, project_root)  # type: ignore[arg-type]
+            result = execute_tool(
+                function_name,  # type: ignore[arg-type]
+                function_args,
+                project_root,
+                lms_api_key,
+                agent_api_base_url,
+            )
 
             print(f"Tool result: {result[:100]}...", file=sys.stderr)
 
@@ -373,12 +485,20 @@ def main() -> int:
     project_root = Path(__file__).parent
 
     # Load environment variables from .env.agent.secret
-    env_path = project_root / ".env.agent.secret"
-    env_vars = load_env(str(env_path))
+    env_path_agent = project_root / ".env.agent.secret"
+    env_vars_agent = load_env(str(env_path_agent))
 
-    api_key = env_vars.get("LLM_API_KEY")
-    api_base = env_vars.get("LLM_API_BASE")
-    model = env_vars.get("LLM_MODEL", "qwen3-coder-plus")
+    # Load LMS API key from .env.docker.secret
+    env_path_docker = project_root / ".env.docker.secret"
+    env_vars_docker = load_env(str(env_path_docker))
+
+    api_key = env_vars_agent.get("LLM_API_KEY")
+    api_base = env_vars_agent.get("LLM_API_BASE")
+    model = env_vars_agent.get("LLM_MODEL", "qwen3-coder-plus")
+
+    # Load LMS API key and agent API base URL
+    lms_api_key = env_vars_docker.get("LMS_API_KEY")
+    agent_api_base_url = env_vars_docker.get("AGENT_API_BASE_URL")
 
     # Validate required environment variables
     if not api_key:
@@ -392,13 +512,25 @@ def main() -> int:
     print(f"Using model: {model}", file=sys.stderr)
     print(f"API base: {api_base}", file=sys.stderr)
     print(f"Project root: {project_root}", file=sys.stderr)
+    print(f"LMS API key configured: {'yes' if lms_api_key else 'no'}", file=sys.stderr)
+    print(
+        f"Agent API base URL: {agent_api_base_url or 'http://localhost:42002'}",
+        file=sys.stderr,
+    )
 
     # Create OpenAI client with custom base URL
     client = OpenAI(api_key=api_key, base_url=api_base, timeout=60.0)
 
     try:
         # Run agentic loop
-        output = run_agentic_loop(client, model, question, project_root)
+        output = run_agentic_loop(
+            client,
+            model,
+            question,
+            project_root,
+            lms_api_key,
+            agent_api_base_url,
+        )
 
         # Output valid JSON to stdout
         print(json.dumps(output))
