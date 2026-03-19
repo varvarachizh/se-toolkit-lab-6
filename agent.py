@@ -203,7 +203,8 @@ def tool_query_api(
         base_url = "http://localhost:42002"
 
     url = f"{base_url}{path}"
-    headers = {"X-API-Key": api_key}
+    # Use Bearer token authentication (FastAPI HTTPBearer)
+    headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
         with httpx.Client(timeout=30.0) as client:
