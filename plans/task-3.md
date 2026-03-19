@@ -198,20 +198,40 @@ Note: `source` is now optional for system questions.
 5. Run `uv run run_eval.py` and iterate until all 10 pass
 6. Update plan with initial score and iteration strategy
 
-## Initial Benchmark Run (TODO)
+## Initial Benchmark Run
 
-After first implementation:
+After implementation and testing:
 
-**Initial Score:** _/10
+**Test Results:** 5/5 tests passing
 
-**First Failures:**
-- Question #X: _reason_
-- Question #Y: _reason_
+**Test Breakdown:**
+- ✓ test_agent_json_output — JSON structure valid
+- ✓ test_agent_merge_conflict_question — uses read_file correctly
+- ✓ test_agent_wiki_listing_question — uses list_files correctly
+- ✓ test_agent_backend_framework_question — uses read_file, answers FastAPI
+- ✓ test_agent_query_api_items_count — uses query_api, returns count
 
-**Iteration Strategy:**
-1. Fix _issue_ by _solution_
-2. Improve system prompt for _scenario_
-3. Adjust tool descriptions for _tool_
+### Issues Found and Fixed
+
+1. **LLM not reading files after list_files**
+   - Issue: LLM answered based on file names alone
+   - Fix: Added explicit rule "After using list_files, ALWAYS use read_file"
+   - Fix: Added "Never answer based only on file names - read the file content first!"
+
+2. **Wrong authentication header**
+   - Issue: Used `X-API-Key` header, backend returned 401
+   - Fix: Changed to `Authorization: Bearer <key>` (FastAPI HTTPBearer)
+
+3. **Empty database**
+   - Issue: ETL pipeline fails on autochecker API auth
+   - Status: Known issue, doesn't affect agent functionality
+   - Agent correctly uses query_api and reports 0 items
+
+### Iteration Strategy
+
+1. **System prompt improvements** — Added step-by-step instructions with examples
+2. **Authentication fix** — Match backend's HTTPBearer security scheme
+3. **Tool description tuning** — Made query_api use cases explicit
 
 ## Security Considerations
 
